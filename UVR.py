@@ -25,6 +25,36 @@ import wget
 import traceback
 import matchering as match
 import tkinter as tk
+# FEDORA_UVR_UI_SCALE_V1
+# Scale pixel offsets used by Tk's place geometry manager; do not touch
+# relx/rely/relwidth/relheight since they are already proportional.
+import os as _fedora_ui_os
+
+def _fedora_ui_factor():
+    try:
+        value = float(_fedora_ui_os.environ.get("UVR_UI_SCALE", "1.6"))
+    except ValueError:
+        value = 1.6
+    return max(1.0, min(value, 2.5))
+
+_FEDORA_UI_FACTOR = _fedora_ui_factor()
+if _FEDORA_UI_FACTOR != 1.0:
+    _fedora_place_original = tk.Place.place_configure
+    def _fedora_place_scaled(self, cnf=None, **kw):
+        # Tkinter permits dict-form options as well as keyword options.
+        options = {} if cnf is None else dict(cnf)
+        options.update(kw)
+        for key in ("x", "y", "width", "height"):
+            if key in options and options[key] not in (None, ""):
+                try:
+                    options[key] = round(float(options[key]) * _FEDORA_UI_FACTOR)
+                except (TypeError, ValueError):
+                    pass
+        return _fedora_place_original(self, options)
+    tk.Place.place_configure = _fedora_place_scaled
+    tk.Place.place = _fedora_place_scaled
+# END FEDORA_UVR_UI_SCALE_V1
+
 import tkinter.ttk as ttk
 from tkinter.font import Font
 from tkinter import filedialog
@@ -957,12 +987,44 @@ class ToolTip(object):
             y = self.widget.winfo_rooty() + self.widget.winfo_height()
 
             temp_tooltip.destroy()
-        else:
-            x, y, _, _ = self.widget.bbox("insert")
-            x += self.widget.winfo_rootx() + 25
-            y += self.widget.winfo_rooty() + 25
+        # Hover hints stay inside the application window.  Creating a separate
+        # Toplevel under XWayland can steal pointer focus and cause Enter/Leave
+        # loops (flickering tooltips).
+        if not is_message_box:
+            owner = self.widget.winfo_toplevel()
+            hint = tk.Label(owner, **create_label_config(), padx=10, pady=10,
+                            wraplength=320)
+            hint.update_idletasks()
+            hint_width = hint.winfo_reqwidth()
+            hint_height = hint.winfo_reqheight()
+            widget_x = self.widget.winfo_rootx() - owner.winfo_rootx()
+            widget_y = self.widget.winfo_rooty() - owner.winfo_rooty()
+            owner_width = owner.winfo_width()
+            owner_height = owner.winfo_height()
+            gap = 12
+            # Do not cover the control; if there is no room, do not show a hint.
+            above = widget_y - gap - hint_height
+            below = widget_y + self.widget.winfo_height() + gap
+            # Keep the hint close to its control, not at the far right.
+            # Place its box centrally above/below the control and clamp to window.
+            x = max(12, min(widget_x - hint_width // 2,
+                            max(12, owner_width - hint_width - 12)))
+            if above >= 0:
+                y = above
+            elif below + hint_height <= owner_height:
+                y = below
+            else:
+                hint.destroy()
+                return
+            # x/y are already measured in actual Tk pixels.  Do not pass them
+            # through the Fedora place() wrapper, which multiplies them again.
+            place_unscaled = globals().get("_fedora_place_original", tk.Place.place_configure)
+            place_unscaled(hint, {"x": x, "y": y})
+            hint.lift()
+            self.tooltip = hint
+            return
 
-        # Create the actual tooltip
+        # Modal/status messages still use their existing popup behaviour.
         self.tooltip = tk.Toplevel(self.widget)
         self.tooltip.wm_overrideredirect(True)  
         self.tooltip.wm_geometry(f"+{x}+{y}")
@@ -1287,13 +1349,68 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
     def __init__(self):
         #Run the __init__ method on the tk.Tk class
         super().__init__()
-        
+
+#        # Fedora Tk 9 DPI test
+#        self.tk.call('tk', 'scaling', 1.0)
+#        print("UVR Tk scaling:", self.tk.call('tk', 'scaling'))
+
         self.set_app_font()
 
         style = ttk.Style(self)
         style.map('TCombobox', selectbackground=[('focus', '#0c0c0c')], selectforeground=[('focus', 'white')])
         style.configure('TCombobox', selectbackground='#0c0c0c')
-        #style.configure('TCheckbutton', indicatorsize=30)
+        # Fedora Tk 9: the Sun Valley check indicator has fixed pixel size.
+        # Provide larger indicators without changing the system's DPI scaling.
+        if OPERATING_SYSTEM == "Linux":
+            import copy
+            import os as _uvr_ui_os
+            try:
+                _ui_scale = float(_uvr_ui_os.environ.get("UVR_UI_SCALE", "1.6"))
+            except ValueError:
+                _ui_scale = 1.6
+            _ui_scale = max(1.0, min(_ui_scale, 2.5))
+            _box = max(20, round(17 * _ui_scale))
+            _check_text_gap = round(10 * _ui_scale)
+            self._fedora_check_images = []
+            for _checked in (False, True):
+                _img = tk.PhotoImage(master=self, width=_box + _check_text_gap, height=_box)
+                _img.put("#27292e", to=(0, 0, _box, _box))
+                _img.put("#d0d0d0", to=(1, 1, _box-1, _box-1))
+                _img.put("#27292e", to=(3, 3, _box-3, _box-3))
+                if _checked:
+                    _img.put("#65b6ff", to=(4, 4, _box-4, _box-4))
+                    for _x in range(_box // 4, _box // 2):
+                        _y = _box // 2 + (_x - _box // 3) // 2
+                        _img.put("#ffffff", to=(_x, _y, _x+2, _y+2))
+                    for _x in range(_box // 2, 3 * _box // 4):
+                        _y = _box // 2 - (_x - _box // 2)
+                        _img.put("#ffffff", to=(_x, _y, _x+2, _y+2))
+                self._fedora_check_images.append(_img)
+            try:
+                style.element_create(
+                    "Fedora.Checkbutton.indicator", "image",
+                    self._fedora_check_images[0],
+                    ("selected", self._fedora_check_images[1]),
+                    sticky="w")
+                def _bigger_indicator(nodes):
+                    result = []
+                    for name, options in nodes:
+                        options = copy.deepcopy(options)
+                        if name.endswith(".indicator"):
+                            name = "Fedora.Checkbutton.indicator"
+                        if "children" in options:
+                            options["children"] = _bigger_indicator(options["children"])
+                        result.append((name, options))
+                    return result
+                # Use a distinct style so the original theme stays intact.
+                style.layout("Fedora.TCheckbutton", _bigger_indicator(style.layout("TCheckbutton")))
+                style.configure("Fedora.TCheckbutton", padding=(3, 2, 3, 2))
+                self._fedora_check_style = "Fedora.TCheckbutton"
+            except tk.TclError as exc:
+                print("Fedora checkbox style unavailable:", exc)
+                self._fedora_check_style = "TCheckbutton"
+        else:
+            self._fedora_check_style = "TCheckbutton"
         
         # Calculate window height
         height = self.IMAGE_HEIGHT + self.FILEPATHS_HEIGHT + self.OPTIONS_HEIGHT
@@ -1315,7 +1432,7 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
  
         self.iconbitmap(ICON_IMG_PATH) if is_windows else self.tk.call('wm', 'iconphoto', self._w, tk.PhotoImage(file=MAIN_ICON_IMG_PATH))
         self.protocol("WM_DELETE_WINDOW", self.save_values)
-        self.resizable(False, False)
+        self.resizable(True, True)
         
         self.msg_queue = queue.Queue()
         # Create a custom style that inherits from the original Combobox style.
@@ -1670,20 +1787,77 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
         self.command_Text = ThreadSafeConsole(master=self.console_Frame, background='#0c0c0d',fg='#898b8e', highlightcolor="#0c0c0d",  font=(MAIN_FONT_NAME, FONT_SIZE_4), borderwidth=0)
         self.command_Text.pack(fill=tk.BOTH, expand=1)
         self.command_Text.bind(right_click_button, lambda e:self.right_click_console(e))
-            
+
+        # Keep the footer directly below the options panel, irrespective of
+        # extra window height. Geometry below is already in Tk pixels.
+        self.bind("<Configure>", self._fedora_layout_footer, add="+")
+        self.after_idle(self._fedora_layout_footer)
+
+    def _fedora_layout_footer(self, event=None):
+        if event is not None and event.widget is not self:
+            return
+        if not all(widget.winfo_exists() for widget in (
+                self.options_Frame, self.settings_Button, self.conversion_Button,
+                self.stop_Button, self.progressbar, self.console_Frame)):
+            return
+
+        width = self.winfo_width()
+        if width < 300:
+            return
+        scale = _FEDORA_UI_FACTOR
+        margin = round(12 * scale)
+        gap = round(6 * scale)
+        button_h = round(30 * scale)
+        bar_h = max(8, round(8 * scale))
+        console_min_h = round(100 * scale)
+
+        # options_Frame geometry has already been scaled by the existing
+        # place wrapper. Do not multiply its actual pixel dimensions again.
+        options_bottom = self.options_Frame.winfo_y() + self.options_Frame.winfo_height()
+        button_y = options_bottom + gap
+        console_y = button_y + button_h + gap
+        bar_gap = gap
+        bottom_gap = margin
+        min_height = console_y + console_min_h + bar_gap + bar_h + bottom_gap
+        min_width = max(420, 2 * margin + 3 * button_h + 8 * gap + 160)
+        if getattr(self, "_fedora_footer_minimum", None) != (min_width, min_height):
+            self._fedora_footer_minimum = (min_width, min_height)
+            self.minsize(min_width, min_height)
+
+        # The console absorbs extra vertical space; options and buttons
+        # stay together, and the progress bar stays below the console.
+        console_h = max(console_min_h, self.winfo_height() - console_y - bar_gap - bar_h - bottom_gap)
+        bar_y = console_y + console_h + bar_gap
+        icon_w = button_h
+        button_width = max(160, width - 2 * margin - 2 * icon_w - 2 * gap)
+        coords = (
+            (self.settings_Button, dict(x=margin, y=button_y, width=icon_w, height=button_h)),
+            (self.conversion_Button, dict(x=margin + icon_w + gap, y=button_y,
+                                          width=button_width, height=button_h)),
+            (self.stop_Button, dict(x=margin + icon_w + gap + button_width + gap,
+                                    y=button_y, width=icon_w, height=button_h)),
+            (self.console_Frame, dict(x=margin, y=console_y, width=width - 2 * margin,
+                                      height=console_h)),
+            (self.progressbar, dict(x=margin, y=bar_y, width=width - 2 * margin,
+                                    height=bar_h)),
+        )
+        place_raw = globals().get("_fedora_place_original", tk.Place.place_configure)
+        for widget, geometry in coords:
+            place_raw(widget, dict(geometry, relx=0, rely=0, relwidth=0, relheight=0))
+
     def fill_filePaths_Frame(self):
         """Fill Frame with neccessary widgets"""
 
         # Select Music Files Option
         self.filePaths_Frame = ttk.Frame(master=self)
-        self.filePaths_Frame.place(x=FILEPATHS_FRAME_X, y=FILEPATHS_FRAME_Y, width=FILEPATHS_FRAME_WIDTH, height=self.FILEPATHS_HEIGHT, relx=0, rely=0, relwidth=1, relheight=0)
+        self.filePaths_Frame.place(x=FILEPATHS_FRAME_X, y=FILEPATHS_FRAME_Y, width=FILEPATHS_FRAME_WIDTH, height=self.FILEPATHS_HEIGHT / _FEDORA_UI_FACTOR, relx=0, rely=0, relwidth=1, relheight=0)
 
         self.filePaths_musicFile_Button = ttk.Button(master=self.filePaths_Frame, text=SELECT_INPUT_TEXT, command=self.input_select_filedialog)
-        self.filePaths_musicFile_Button.place(x=MUSICFILE_BUTTON_X, y=MUSICFILE_BUTTON_Y, width=MUSICFILE_BUTTON_WIDTH, height=MUSICFILE_BUTTON_HEIGHT, relx=0, rely=0, relwidth=0.3, relheight=0.5)
+        self.filePaths_musicFile_Button.place(x=0, y=3, width=-6, height=-6, relx=0, rely=0, relwidth=0.30, relheight=0.5)
         self.filePaths_musicFile_Entry = ttk.Entry(master=self.filePaths_Frame, textvariable=self.inputPathsEntry_var, font=self.font_entry, state=tk.DISABLED)
-        self.filePaths_musicFile_Entry.place(x=MUSICFILE_ENTRY_X, y=MUSICFILE_BUTTON_Y, width=MUSICFILE_ENTRY_WIDTH, height=MUSICFILE_ENTRY_HEIGHT, relx=0.3, rely=0, relwidth=0.7, relheight=0.5)                                   
+        self.filePaths_musicFile_Entry.place(x=6, y=3, width=-58, height=-6, relx=0.30, rely=0, relwidth=0.70, relheight=0.5)                                   
         self.filePaths_musicFile_Open = ttk.Button(master=self.filePaths_Frame, image=self.efile_img, command=lambda:OPEN_FILE_func(os.path.dirname(self.inputPaths[0])) if self.inputPaths and os.path.isdir(os.path.dirname(self.inputPaths[0])) else self.error_dialoge(INVALID_INPUT))
-        self.filePaths_musicFile_Open.place(x=OPEN_BUTTON_X, y=MUSICFILE_BUTTON_Y, width=OPEN_BUTTON_WIDTH, height=MUSICFILE_ENTRY_HEIGHT, relx=0.3, rely=0, relwidth=0.7, relheight=0.5)   
+        self.filePaths_musicFile_Open.place(x=-46, y=3, width=40, height=-6, relx=1, rely=0, relwidth=0, relheight=0.5)   
 
         # Add any additional configurations or method calls here
         self.filePaths_musicFile_Entry.configure(cursor="hand2")
@@ -1693,11 +1867,11 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
 
         # Save To Option
         self.filePaths_saveTo_Button = ttk.Button(master=self.filePaths_Frame, text=SELECT_OUTPUT_TEXT, command=self.export_select_filedialog)
-        self.filePaths_saveTo_Button.place(x=SAVETO_BUTTON_X, y=SAVETO_BUTTON_Y, width=SAVETO_BUTTON_WIDTH, height=SAVETO_BUTTON_HEIGHT, relx=0, rely=0.5, relwidth=0.3, relheight=0.5)
+        self.filePaths_saveTo_Button.place(x=0, y=3, width=-6, height=-6, relx=0, rely=0.5, relwidth=0.30, relheight=0.5)
         self.filePaths_saveTo_Entry = ttk.Entry(master=self.filePaths_Frame, textvariable=self.export_path_var, font=self.font_entry, state=tk.DISABLED)
-        self.filePaths_saveTo_Entry.place(x=SAVETO_ENTRY_X, y=SAVETO_BUTTON_Y, width=SAVETO_ENTRY_WIDTH, height=SAVETO_ENTRY_HEIGHT, relx=0.3, rely=0.5, relwidth=0.7, relheight=0.5)
+        self.filePaths_saveTo_Entry.place(x=6, y=3, width=-58, height=-6, relx=0.30, rely=0.5, relwidth=0.70, relheight=0.5)
         self.filePaths_saveTo_Open = ttk.Button(master=self.filePaths_Frame, image=self.efile_img, command=lambda:OPEN_FILE_func(Path(self.export_path_var.get())) if os.path.isdir(self.export_path_var.get()) else self.error_dialoge(INVALID_EXPORT))
-        self.filePaths_saveTo_Open.place(x=OPEN_BUTTON_X, y=SAVETO_BUTTON_Y, width=OPEN_BUTTON_WIDTH, height=SAVETO_ENTRY_HEIGHT, relx=0.3, rely=0.5, relwidth=0.7, relheight=0.5)
+        self.filePaths_saveTo_Open.place(x=-46, y=3, width=40, height=-6, relx=1, rely=0.5, relwidth=0, relheight=0.5)
         self.help_hints(self.filePaths_saveTo_Button, text=OUTPUT_FOLDER_ENTRY_HELP) 
         self.help_hints(self.filePaths_saveTo_Open, text=OUTPUT_FOLDER_BUTTON_HELP)     
 
@@ -1705,21 +1879,21 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
         """Fill Frame with neccessary widgets"""
         
         self.options_Frame = ttk.Frame(master=self)
-        self.options_Frame.place(x=OPTIONS_FRAME_X, y=OPTIONS_FRAME_Y, width=OPTIONS_FRAME_WIDTH, height=self.OPTIONS_HEIGHT, relx=0, rely=0, relwidth=1, relheight=0)
+        self.options_Frame.place(x=OPTIONS_FRAME_X, y=OPTIONS_FRAME_Y, width=OPTIONS_FRAME_WIDTH, height=self.OPTIONS_HEIGHT / _FEDORA_UI_FACTOR, relx=0, rely=0, relwidth=1, relheight=0)
 
         # -Create Widgets-
 
         ## Save Format
         self.wav_button = ttk.Radiobutton(master=self.options_Frame, text=WAV, variable=self.save_format_var, value=WAV)
-        self.wav_button.place(x=RADIOBUTTON_X_WAV, y=RADIOBUTTON_Y, width=RADIOBUTTON_WIDTH, height=RADIOBUTTON_HEIGHT, relx=0, rely=0/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
+        self.wav_button.place(x=8, y=3, width=-16, height=-6, relx=0, rely=0, relwidth=1/3, relheight=1/self.COL2_ROWS)
         self.help_hints(self.wav_button, text=f'{FORMAT_SETTING_HELP}{WAV}')
 
         self.flac_button = ttk.Radiobutton(master=self.options_Frame, text=FLAC, variable=self.save_format_var, value=FLAC)
-        self.flac_button.place(x=RADIOBUTTON_X_FLAC, y=RADIOBUTTON_Y, width=RADIOBUTTON_WIDTH, height=RADIOBUTTON_HEIGHT, relx=1/3, rely=0/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
+        self.flac_button.place(x=8, y=3, width=-16, height=-6, relx=1/3, rely=0, relwidth=1/3, relheight=1/self.COL2_ROWS)
         self.help_hints(self.flac_button, text=f'{FORMAT_SETTING_HELP}{FLAC}')
 
         self.mp3_button = ttk.Radiobutton(master=self.options_Frame, text=MP3, variable=self.save_format_var, value=MP3)
-        self.mp3_button.place(x=RADIOBUTTON_X_MP3, y=RADIOBUTTON_Y, width=RADIOBUTTON_WIDTH, height=RADIOBUTTON_HEIGHT, relx=2/3, rely=0/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
+        self.mp3_button.place(x=8, y=3, width=-16, height=-6, relx=2/3, rely=0, relwidth=1/3, relheight=1/self.COL2_ROWS)
         self.help_hints(self.mp3_button, text=f'{FORMAT_SETTING_HELP}{MP3}')
 
         # Choose Conversion Method
@@ -1821,13 +1995,13 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
      
         # Stem A
         self.is_primary_stem_only_Demucs_Option = ttk.Checkbutton(master=self.options_Frame, textvariable=self.is_primary_stem_only_Demucs_Text_var, variable=self.is_primary_stem_only_Demucs_var, command=lambda:self.is_primary_stem_only_Demucs_Option_toggle())
-        self.is_primary_stem_only_Demucs_Option_place = lambda:self.is_primary_stem_only_Demucs_Option.place(x=CHECK_BOX_X, y=CHECK_BOX_Y, width=CHECK_BOX_WIDTH, height=CHECK_BOX_HEIGHT, relx=1/3, rely=6/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
+        self.is_primary_stem_only_Demucs_Option_place = lambda:self.is_primary_stem_only_Demucs_Option.place(x=0, y=CHECK_BOX_Y, width=0, height=CHECK_BOX_HEIGHT, relx=1/3, rely=6/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
         self.is_primary_stem_only_Demucs_Option_toggle = lambda:self.is_secondary_stem_only_Demucs_var.set(False) if self.is_primary_stem_only_Demucs_var.get() else self.is_secondary_stem_only_Demucs_Option.configure(state=tk.NORMAL)
         self.help_hints(self.is_primary_stem_only_Demucs_Option, text=SAVE_STEM_ONLY_HELP)
         
         # Stem B
         self.is_secondary_stem_only_Demucs_Option = ttk.Checkbutton(master=self.options_Frame, textvariable=self.is_secondary_stem_only_Demucs_Text_var, variable=self.is_secondary_stem_only_Demucs_var, command=lambda:self.is_secondary_stem_only_Demucs_Option_toggle())
-        self.is_secondary_stem_only_Demucs_Option_place = lambda:self.is_secondary_stem_only_Demucs_Option.place(x=CHECK_BOX_X, y=CHECK_BOX_Y, width=CHECK_BOX_WIDTH, height=CHECK_BOX_HEIGHT, relx=1/3, rely=7/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
+        self.is_secondary_stem_only_Demucs_Option_place = lambda:self.is_secondary_stem_only_Demucs_Option.place(x=0, y=CHECK_BOX_Y, width=0, height=CHECK_BOX_HEIGHT, relx=1/3, rely=7/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
         self.is_secondary_stem_only_Demucs_Option_toggle = lambda:self.is_primary_stem_only_Demucs_var.set(False) if self.is_secondary_stem_only_Demucs_var.get() else self.is_primary_stem_only_Demucs_Option.configure(state=tk.NORMAL)
         self.is_stem_only_Demucs_Options_Enable = lambda:(self.is_primary_stem_only_Demucs_Option.configure(state=tk.NORMAL), self.is_secondary_stem_only_Demucs_Option.configure(state=tk.NORMAL))
         self.help_hints(self.is_secondary_stem_only_Demucs_Option, text=SAVE_STEM_ONLY_HELP)
@@ -1902,12 +2076,12 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
 
         # Is Time Correction
         self.is_time_correction_Option = ttk.Checkbutton(master=self.options_Frame, text=TIME_CORRECTION_TEXT, variable=self.is_time_correction_var)
-        self.is_time_correction_Option_place = lambda:self.is_time_correction_Option.place(x=CHECK_BOX_X, y=CHECK_BOX_Y, width=CHECK_BOX_WIDTH, height=CHECK_BOX_HEIGHT, relx=1/3, rely=5/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
+        self.is_time_correction_Option_place = lambda:self.is_time_correction_Option.place(x=0, y=CHECK_BOX_Y, width=0, height=CHECK_BOX_HEIGHT, relx=1/3, rely=5/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
         self.help_hints(self.is_time_correction_Option, text=IS_TIME_CORRECTION_HELP)
         
         # Is Wav Ensemble
         self.is_wav_ensemble_Option = ttk.Checkbutton(master=self.options_Frame, text=ENSEMBLE_WAVFORMS_TEXT, variable=self.is_wav_ensemble_var)
-        self.is_wav_ensemble_Option_place = lambda:self.is_wav_ensemble_Option.place(x=CHECK_BOX_X, y=CHECK_BOX_Y, width=CHECK_BOX_WIDTH, height=CHECK_BOX_HEIGHT, relx=1/3, rely=5/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
+        self.is_wav_ensemble_Option_place = lambda:self.is_wav_ensemble_Option.place(x=0, y=CHECK_BOX_Y, width=0, height=CHECK_BOX_HEIGHT, relx=1/3, rely=5/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
         self.help_hints(self.is_wav_ensemble_Option, text=IS_WAV_ENSEMBLE_HELP)
 
         ## ALIGN TOOL ##
@@ -1968,28 +2142,28 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
         ### SHARED SETTINGS ###
         
         # GPU Selection
-        self.is_gpu_conversion_Option = ttk.Checkbutton(master=self.options_Frame, text=GPU_CONVERSION_MAIN_LABEL, variable=self.is_gpu_conversion_var)
-        self.is_gpu_conversion_Option_place = lambda:self.is_gpu_conversion_Option.place(x=CHECK_BOX_X, y=CHECK_BOX_Y, width=CHECK_BOX_WIDTH, height=CHECK_BOX_HEIGHT, relx=1/3, rely=5/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
+        self.is_gpu_conversion_Option = ttk.Checkbutton(master=self.options_Frame, text=GPU_CONVERSION_MAIN_LABEL, variable=self.is_gpu_conversion_var, style=self._fedora_check_style)
+        self.is_gpu_conversion_Option_place = lambda:self.is_gpu_conversion_Option.place(x=0, y=CHECK_BOX_Y, width=0, height=CHECK_BOX_HEIGHT, relx=1/3, rely=5/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
         self.is_gpu_conversion_Disable = lambda:(self.is_gpu_conversion_Option.configure(state=tk.DISABLED), self.is_gpu_conversion_var.set(False))
         self.is_gpu_conversion_Enable = lambda:self.is_gpu_conversion_Option.configure(state=tk.NORMAL)
         self.help_hints(self.is_gpu_conversion_Option, text=IS_GPU_CONVERSION_HELP)
 
         # Vocal Only
-        self.is_primary_stem_only_Option = ttk.Checkbutton(master=self.options_Frame, textvariable=self.is_primary_stem_only_Text_var, variable=self.is_primary_stem_only_var, command=lambda:self.is_primary_stem_only_Option_toggle())
-        self.is_primary_stem_only_Option_place = lambda:self.is_primary_stem_only_Option.place(x=CHECK_BOX_X, y=CHECK_BOX_Y, width=CHECK_BOX_WIDTH, height=CHECK_BOX_HEIGHT, relx=1/3, rely=6/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
+        self.is_primary_stem_only_Option = ttk.Checkbutton(master=self.options_Frame, textvariable=self.is_primary_stem_only_Text_var, variable=self.is_primary_stem_only_var, command=lambda:self.is_primary_stem_only_Option_toggle(), style=self._fedora_check_style)
+        self.is_primary_stem_only_Option_place = lambda:self.is_primary_stem_only_Option.place(x=0, y=CHECK_BOX_Y, width=0, height=CHECK_BOX_HEIGHT, relx=1/3, rely=6/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
         self.is_primary_stem_only_Option_toggle = lambda:self.is_secondary_stem_only_var.set(False) if self.is_primary_stem_only_var.get() else self.is_secondary_stem_only_Option.configure(state=tk.NORMAL)
         self.help_hints(self.is_primary_stem_only_Option, text=SAVE_STEM_ONLY_HELP)
         
         # Instrumental Only 
-        self.is_secondary_stem_only_Option = ttk.Checkbutton(master=self.options_Frame, textvariable=self.is_secondary_stem_only_Text_var, variable=self.is_secondary_stem_only_var, command=lambda:self.is_secondary_stem_only_Option_toggle())
-        self.is_secondary_stem_only_Option_place = lambda:self.is_secondary_stem_only_Option.place(x=CHECK_BOX_X, y=CHECK_BOX_Y, width=CHECK_BOX_WIDTH, height=CHECK_BOX_HEIGHT, relx=1/3, rely=7/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
+        self.is_secondary_stem_only_Option = ttk.Checkbutton(master=self.options_Frame, textvariable=self.is_secondary_stem_only_Text_var, variable=self.is_secondary_stem_only_var, command=lambda:self.is_secondary_stem_only_Option_toggle(), style=self._fedora_check_style)
+        self.is_secondary_stem_only_Option_place = lambda:self.is_secondary_stem_only_Option.place(x=0, y=CHECK_BOX_Y, width=0, height=CHECK_BOX_HEIGHT, relx=1/3, rely=7/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
         self.is_secondary_stem_only_Option_toggle = lambda:self.is_primary_stem_only_var.set(False) if self.is_secondary_stem_only_var.get() else self.is_primary_stem_only_Option.configure(state=tk.NORMAL)
         self.is_stem_only_Options_Enable = lambda:(self.is_primary_stem_only_Option.configure(state=tk.NORMAL), self.is_secondary_stem_only_Option.configure(state=tk.NORMAL))
         self.help_hints(self.is_secondary_stem_only_Option, text=SAVE_STEM_ONLY_HELP)
         
         # Sample Mode
-        self.model_sample_mode_Option = ttk.Checkbutton(master=self.options_Frame, textvariable=self.model_sample_mode_duration_checkbox_var, variable=self.model_sample_mode_var)#f'Sample ({self.model_sample_mode_duration_var.get()} Seconds)'
-        self.model_sample_mode_Option_place = lambda rely=8:self.model_sample_mode_Option.place(x=CHECK_BOX_X, y=CHECK_BOX_Y, width=CHECK_BOX_WIDTH, height=CHECK_BOX_HEIGHT, relx=1/3, rely=rely/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
+        self.model_sample_mode_Option = ttk.Checkbutton(master=self.options_Frame, textvariable=self.model_sample_mode_duration_checkbox_var, variable=self.model_sample_mode_var, style=self._fedora_check_style)#f'Sample ({self.model_sample_mode_duration_var.get()} Seconds)'
+        self.model_sample_mode_Option_place = lambda rely=8:self.model_sample_mode_Option.place(x=0, y=CHECK_BOX_Y, width=0, height=CHECK_BOX_HEIGHT, relx=1/3, rely=rely/self.COL2_ROWS, relwidth=1/3, relheight=1/self.COL2_ROWS)
         self.help_hints(self.model_sample_mode_Option, text=MODEL_SAMPLE_MODE_HELP)
         
         self.GUI_LIST = (self.vr_model_Label,
@@ -2121,7 +2295,7 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
         self.fileOne_Entry.bind(right_click_button, lambda e:self.input_dual_right_click_menu(e, is_primary=True))
         self.fileTwo_Entry.bind(right_click_button, lambda e:self.input_dual_right_click_menu(e, is_primary=False))
         if not is_macos:
-            self.bind("<Configure>", self.adjust_toplevel_positions)
+            self.bind("<Configure>", self.adjust_toplevel_positions, add="+")
         
     def auto_save(self):
         try:
@@ -2344,10 +2518,28 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
 
     def help_hints(self, widget, text):
         toolTip = ToolTip(widget)
-        def enter(event):
-            if self.help_hints_var.get():
+        pending_hint = None
+
+        def cancel_pending():
+            nonlocal pending_hint
+            if pending_hint is not None:
+                widget.after_cancel(pending_hint)
+                pending_hint = None
+
+        def show_delayed():
+            nonlocal pending_hint
+            pending_hint = None
+            if self.help_hints_var.get() and widget.winfo_exists():
                 toolTip.showtip(text)
+
+        def enter(event):
+            nonlocal pending_hint
+            cancel_pending()
+            if self.help_hints_var.get():
+                pending_hint = widget.after(500, show_delayed)
+
         def leave(event):
+            cancel_pending()
             toolTip.hidetip()
         widget.bind('<Enter>', enter)
         widget.bind('<Leave>', leave)
@@ -5194,7 +5386,7 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
                         elif OPERATING_SYSTEM == "Linux":
                             self.download_update_link_var.set(UPDATE_LINUX_REPO)
                     
-                    if not user_refresh:
+                    if not user_refresh and OPERATING_SYSTEM != "Linux":
                         if not is_beta_version and not self.lastest_version == current_patch:
                             self.command_Text.write(NEW_UPDATE_FOUND_TEXT(self.lastest_version))
 
