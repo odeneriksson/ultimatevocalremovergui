@@ -823,6 +823,10 @@ class Ensembler():
         if len(stem_outputs) > 1:
             spec_utils.ensemble_inputs(stem_outputs, algorithm, self.is_normalization, self.wav_type_set, stem_save_path, is_wave=self.is_wav_ensemble)
             save_format(stem_save_path, self.save_format, self.mp3_bit_set)
+        elif len(stem_outputs) == 1:
+            # With one model, export its stem without attempting to ensemble it.
+            shutil.copy2(stem_outputs[0], stem_save_path)
+            save_format(stem_save_path, self.save_format, self.mp3_bit_set)
         
         if self.is_save_all_outputs_ensemble:
             for i in stem_outputs:
@@ -5239,7 +5243,7 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
         validation = lambda value:False if re.fullmatch(REG_SAVE_INPUT, value) is None else True
         save_func = lambda:(self.pop_up_save_ensemble_sub_json_dump(self.ensemble_listbox_get_all_selected_models(), ensemble_save_var.get()), ensemble_save.destroy())
 
-        if len(self.ensemble_listbox_get_all_selected_models()) <= 1:
+        if len(self.ensemble_listbox_get_all_selected_models()) == 0:
             ensemble_save_title = self.menu_title_LABEL_SET(ensemble_save_Frame, ENSEMBLE_WARNING_NOT_ENOUGH_SHORT_TEXT, width=20)
             ensemble_save_title.grid()
             
@@ -6344,7 +6348,7 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
         self.process_check_wav_type()
         
         if self.chosen_process_method_var.get() == ENSEMBLE_MODE:
-            continue_process = lambda:False if len(self.ensemble_listbox_get_all_selected_models()) <= 1 else True
+            continue_process = lambda:False if len(self.ensemble_listbox_get_all_selected_models()) == 0 else True
         if self.chosen_process_method_var.get() == VR_ARCH_PM:
             continue_process = lambda:False if self.vr_model_var.get() == CHOOSE_MODEL else True
         if self.chosen_process_method_var.get() == MDX_ARCH_TYPE:
