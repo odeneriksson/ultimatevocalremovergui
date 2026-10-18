@@ -3467,14 +3467,17 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
         delete_your_settings_Option.grid(padx=20,pady=MENU_PADDING_1)
         self.deletion_list_fill(delete_your_settings_Option, option_var, SETTINGS_CACHE_DIR, SELECT_SAVED_SETTING, menu_name='deletesetting')
 
-        app_update_Label = self.menu_title_LABEL_SET(settings_menu_main_Frame, APPLICATION_UPDATES_TEXT)
-        app_update_Label.grid(pady=MENU_PADDING_2)
+        # Application self-updates are not supported by this Fedora fork.
+        # Keep Download Center and model-parameter updates available.
+        if OPERATING_SYSTEM != "Linux":
+            app_update_Label = self.menu_title_LABEL_SET(settings_menu_main_Frame, APPLICATION_UPDATES_TEXT)
+            app_update_Label.grid(pady=MENU_PADDING_2)
         
-        self.app_update_button = ttk.Button(settings_menu_main_Frame, textvariable=self.app_update_button_Text_var, width=SETTINGS_BUT_WIDTH-2, command=lambda:self.pop_up_update_confirmation())
-        self.app_update_button.grid(pady=MENU_PADDING_1)
+            self.app_update_button = ttk.Button(settings_menu_main_Frame, textvariable=self.app_update_button_Text_var, width=SETTINGS_BUT_WIDTH-2, command=lambda:self.pop_up_update_confirmation())
+            self.app_update_button.grid(pady=MENU_PADDING_1)
         
-        self.app_update_status_Label = tk.Label(settings_menu_main_Frame, textvariable=self.app_update_status_Text_var, padx=3, pady=3, font=(MAIN_FONT_NAME,  f"{FONT_SIZE_4}"), width=UPDATE_LABEL_WIDTH, justify="center", relief="ridge", fg="#13849f")
-        self.app_update_status_Label.grid(pady=20)
+            self.app_update_status_Label = tk.Label(settings_menu_main_Frame, textvariable=self.app_update_status_Text_var, padx=3, pady=3, font=(MAIN_FONT_NAME,  f"{FONT_SIZE_4}"), width=UPDATE_LABEL_WIDTH, justify="center", relief="ridge", fg="#13849f")
+            self.app_update_status_Label.grid(pady=20)
         
         donate_Button = ttk.Button(settings_menu_main_Frame, image=self.donate_img, command=lambda:webbrowser.open_new_tab(DONATE_LINK_BMAC))
         donate_Button.grid(pady=MENU_PADDING_2)
@@ -5368,7 +5371,10 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
                 else:
                     self.lastest_version = self.online_data["current_version"]
                     
-                if self.lastest_version == current_patch and not is_start_up:
+                if OPERATING_SYSTEM == "Linux":
+                    # The upstream application updater does not apply to this fork.
+                    is_new_update = False
+                elif self.lastest_version == current_patch and not is_start_up:
                     self.app_update_status_Text_var.set('UVR Version Current')
                 else:
                     is_new_update = True
