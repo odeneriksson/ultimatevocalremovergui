@@ -17,6 +17,7 @@ import base64
 import queue
 import shutil
 import subprocess
+import tempfile
 import soundfile as sf
 import torch
 import urllib.request
@@ -269,6 +270,7 @@ VR_PARAM_DIR = os.path.join(BASE_PATH, 'lib_v5', 'vr_network', 'modelparams')
 SAMPLE_CLIP_PATH = os.path.join(BASE_PATH, 'temp_sample_clips')
 ENSEMBLE_TEMP_PATH = os.path.join(BASE_PATH, 'ensemble_temps')
 DOWNLOAD_MODEL_CACHE = os.path.join(BASE_PATH, 'gui_data', 'model_manual_download.json')
+MODEL_CATALOG_CACHE = os.path.join(BASE_PATH, 'gui_data', 'model_download_catalog.json')
 
 #CR Text
 CR_TEXT = os.path.join(BASE_PATH, 'gui_data', 'cr_text.txt')
@@ -1587,9 +1589,9 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
         self.toplevels = []
 
         #Download Center Vars
-        self.online_data = {}
+        self.online_data = self.load_cached_model_catalog() if OPERATING_SYSTEM == 'Linux' else {}
         self.bulletin_data = INFO_UNAVAILABLE_TEXT
-        self.is_online = False
+        self.is_online = bool(self.online_data)
         self.lastest_version = ''
         self.model_download_demucs_var = tk.StringVar(value='')
         self.model_download_mdx_var = tk.StringVar(value='')
@@ -1650,7 +1652,9 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
         if not is_windows:
             self.update_idletasks()
         self.fill_gpu_list()
-        self.online_data_refresh(user_refresh=False, is_start_up=True)
+        # Fedora: no network access during application startup.
+        if OPERATING_SYSTEM != "Linux":
+            self.online_data_refresh(user_refresh=False, is_start_up=True)
         
     # Menu Functions
     def main_window_LABEL_SET(self, master, text):return ttk.Label(master=master, text=text, background=BG_COLOR, font=self.font_set, foreground=FG_COLOR, anchor=tk.CENTER)
@@ -3571,23 +3575,23 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
         settings_menu_download_center_Frame = self.menu_FRAME_SET(tab3)
         settings_menu_download_center_Frame.grid(row=0)  
         
-        download_center_title_Label = self.menu_title_LABEL_SET(settings_menu_download_center_Frame, APPLICATION_DOWNLOAD_CENTER_TEXT)
+        download_center_title_Label = self.menu_title_LABEL_SET(settings_menu_download_center_Frame, "Model Download Center" if OPERATING_SYSTEM == "Linux" else APPLICATION_DOWNLOAD_CENTER_TEXT)
         download_center_title_Label.grid(padx=20,pady=MENU_PADDING_2)
 
         select_download_Label = self.menu_sub_LABEL_SET(settings_menu_download_center_Frame, SELECT_DOWNLOAD_TEXT)
         select_download_Label.grid(pady=MENU_PADDING_2)
         
-        self.model_download_vr_Button = ttk.Radiobutton(settings_menu_download_center_Frame, text='VR Arch', width=8, variable=self.select_download_var, value='VR Arc', command=lambda:self.download_list_state())
+        self.model_download_vr_Button = ttk.Radiobutton(settings_menu_download_center_Frame, text='VR Arch', width=8, variable=self.select_download_var, value='VR Arc', command=lambda:self.select_download_arch())
         self.model_download_vr_Button.grid(pady=MENU_PADDING_1)
         self.model_download_vr_Option = ComboBoxMenu(settings_menu_download_center_Frame, textvariable=self.model_download_vr_var, width=READ_ONLY_COMBO_WIDTH)
         self.model_download_vr_Option.grid(pady=MENU_PADDING_1)
         
-        self.model_download_mdx_Button = ttk.Radiobutton(settings_menu_download_center_Frame, text='MDX-Net', width=8, variable=self.select_download_var, value='MDX-Net', command=lambda:self.download_list_state())
+        self.model_download_mdx_Button = ttk.Radiobutton(settings_menu_download_center_Frame, text='MDX-Net', width=8, variable=self.select_download_var, value='MDX-Net', command=lambda:self.select_download_arch())
         self.model_download_mdx_Button.grid(pady=MENU_PADDING_1)
         self.model_download_mdx_Option = ComboBoxMenu(settings_menu_download_center_Frame, textvariable=self.model_download_mdx_var, width=READ_ONLY_COMBO_WIDTH)
         self.model_download_mdx_Option.grid(pady=MENU_PADDING_1)
 
-        self.model_download_demucs_Button = ttk.Radiobutton(settings_menu_download_center_Frame, text='Demucs', width=8, variable=self.select_download_var, value='Demucs', command=lambda:self.download_list_state())
+        self.model_download_demucs_Button = ttk.Radiobutton(settings_menu_download_center_Frame, text='Demucs', width=8, variable=self.select_download_var, value='Demucs', command=lambda:self.select_download_arch())
         self.model_download_demucs_Button.grid(pady=MENU_PADDING_1)
         self.model_download_demucs_Option = ComboBoxMenu(settings_menu_download_center_Frame, textvariable=self.model_download_demucs_var, width=READ_ONLY_COMBO_WIDTH)
         self.model_download_demucs_Option.grid(pady=MENU_PADDING_1)
@@ -3609,8 +3613,16 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
         self.stop_download_Button_DISABLE = lambda:(self.download_stop_var.set(""), self.stop_download_Button.configure(state=tk.DISABLED))
         self.stop_download_Button_ENABLE = lambda:(self.download_stop_var.set(STOP_DOWNLOAD_TEXT), self.stop_download_Button.configure(state=tk.NORMAL))
 
-        self.refresh_list_Button = ttk.Button(settings_menu_download_center_Frame, text=REFRESH_LIST_TEXT, command=lambda:self.online_data_refresh(refresh_list_Button=True))#, command=refresh_list)
+        self.refresh_list_Button = ttk.Button(settings_menu_download_center_Frame, text=REFRESH_LIST_TEXT, command=(self.refresh_model_download_list if OPERATING_SYSTEM == "Linux" else lambda:self.online_data_refresh(refresh_list_Button=True)))
         self.refresh_list_Button.grid(pady=MENU_PADDING_1)
+        if OPERATING_SYSTEM == "Linux":
+            # Explicit opt-in to download updated model metadata.
+            update_model_params_Button = ttk.Button(
+                settings_menu_download_center_Frame,
+                text="Update Model Parameters",
+                command=lambda: KThread(target=self.download_model_settings).start(),
+            )
+            update_model_params_Button.grid(pady=MENU_PADDING_1)
         
         self.download_key_Button = ttk.Button(settings_menu_download_center_Frame, image=self.key_img, command=lambda:self.pop_up_user_code_input())
         self.download_key_Button.grid(pady=MENU_PADDING_1)
@@ -3632,7 +3644,13 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
                                    self.model_download_mdx_var,
                                    self.model_download_demucs_var)
         
-        self.online_data_refresh()
+        # Opening Settings and choosing an architecture must not make network requests.
+        if OPERATING_SYSTEM == "Linux":
+            if self.online_data and not self.select_download_var.get():
+                self.select_download_var.set(VR_ARCH_TYPE)
+            self.select_download_arch()
+        else:
+            self.online_data_refresh()
 
         self.menu_placement(settings_menu, SETTINGS_GUIDE_TEXT, is_help_hints=True, close_function=lambda:close_window())
 
@@ -5329,6 +5347,97 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
                     callback(selection)
 
     #--Download Center Methods--    
+    @staticmethod
+    def valid_model_catalog(data):
+        return isinstance(data, dict) and all(
+            isinstance(data.get(key), dict)
+            for key in ("vr_download_list", "mdx_download_list", "mdx23c_download_list", "demucs_download_list")
+        )
+
+    @staticmethod
+    def load_cached_model_catalog():
+        """Load the last explicitly refreshed model catalogue; never use the network."""
+        try:
+            with open(MODEL_CATALOG_CACHE, encoding="utf-8") as infile:
+                data = json.load(infile)
+            return data if MainWindow.valid_model_catalog(data) else {}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    @staticmethod
+    def save_cached_model_catalog(data):
+        """Write the catalogue atomically to avoid corrupting the prior cache."""
+        directory = os.path.dirname(MODEL_CATALOG_CACHE)
+        os.makedirs(directory, exist_ok=True)
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory,
+                                             prefix=".model_catalog_", suffix=".tmp", delete=False) as outfile:
+                temp_path = outfile.name
+                json.dump(data, outfile, indent=2)
+            os.replace(temp_path, MODEL_CATALOG_CACHE)
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+
+    def select_download_arch(self):
+        """Choose a download architecture without contacting the network."""
+        if OPERATING_SYSTEM == "Linux" and not self.online_data:
+            for widget in self.download_lists:
+                widget.configure(state=tk.DISABLED)
+            for var in self.download_list_vars:
+                var.set("Model list not loaded")
+            self.download_Button.configure(state=tk.DISABLED)
+            self.download_progress_info_var.set("Click Refresh List to load available models")
+            return
+        self.download_list_state()
+
+    def refresh_model_download_list(self):
+        """Explicitly fetch model catalogue on Linux; leave prior data usable on failure."""
+        self.refresh_list_Button.configure(state=tk.DISABLED)
+        self.download_progress_info_var.set("Refreshing model list...")
+
+        def finish(data=None, error=None):
+            self.refresh_list_Button.configure(state=tk.NORMAL)
+            if error is not None:
+                self.download_progress_info_var.set("Unable to refresh model list")
+                self.error_log_var.set(error_text('Model List Refresh', error))
+                return
+            self.online_data = data
+            self.is_online = True
+            try:
+                self.save_cached_model_catalog(data)
+            except OSError as exc:
+                self.error_log_var.set(error_text('Model Catalogue Cache', exc))
+                cache_warning = True
+            else:
+                cache_warning = False
+            if not self.select_download_var.get():
+                self.select_download_var.set(VR_ARCH_TYPE)
+            try:
+                self.download_list_state()
+            except Exception as exc:
+                self.download_progress_info_var.set("Unable to display model list")
+                self.error_log_var.set(error_text('Model List Refresh', exc))
+            else:
+                self.download_progress_info_var.set(
+                    "Download list refreshed (cache save failed)" if cache_warning
+                    else "Download list refreshed and saved"
+                )
+
+        def worker():
+            try:
+                with urllib.request.urlopen(DOWNLOAD_CHECKS, timeout=20) as response:
+                    data = json.load(response)
+                if not self.valid_model_catalog(data):
+                    raise ValueError("Missing or invalid model catalogue")
+            except Exception as exc:
+                self.after(0, lambda e=exc: finish(error=e))
+            else:
+                self.after(0, lambda d=data: finish(data=d))
+
+        KThread(target=worker).start()
 
     def online_data_refresh(self, user_refresh=True, confirmation_box=False, refresh_list_Button=False, is_start_up=False, is_download_complete=False):
         """Checks for application updates"""
@@ -5505,7 +5614,7 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
                     model_name, config = items_list[0]
                     config_link = f"{MDX23_CONFIG_CHECKS}{config}"
                     config_local = os.path.join(MDX_C_CONFIG_PATH, config)
-                    if not os.path.isfile(config_local):
+                    if OPERATING_SYSTEM != "Linux" and not os.path.isfile(config_local):
                         with urllib.request.urlopen(config_link) as response:
                             with open(config_local, 'wb') as out_file:
                                 out_file.write(response.read())
@@ -5676,6 +5785,17 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
                         
                     self.download_post_action(DOWNLOAD_UPDATE_COMPLETE)
                 else:
+                    # Fetch MDX23 config only when its model is actually downloaded.
+                    if OPERATING_SYSTEM == "Linux" and self.select_download_var.get() == MDX_ARCH_TYPE:
+                        chosen = self.selected_download_var.get()
+                        model = self.mdx_download_list.get(chosen)
+                        if isinstance(model, dict):
+                            config = next(iter(model.values()))
+                            config_local = os.path.join(MDX_C_CONFIG_PATH, config)
+                            if not os.path.isfile(config_local):
+                                with urllib.request.urlopen(f"{MDX23_CONFIG_CHECKS}{config}", timeout=20) as response:
+                                    with open(config_local, 'wb') as out_file:
+                                        out_file.write(response.read())
                     if self.select_download_var.get() == DEMUCS_ARCH_TYPE and is_demucs_newer:
                         for model_num, model_data in enumerate(self.download_demucs_newer_models, start=1):
                             self.download_progress_info_var.set('{} {}/{}...'.format(DOWNLOADING_ITEM, model_num, len(self.download_demucs_newer_models)))
@@ -5729,7 +5849,8 @@ class MainWindow(TkinterDnD.Tk if is_dnd_compatible else tk.Tk):
                 self.download_progress_info_var.set(DOWNLOAD_STOPPED)
                 self.download_list_state(reset=False)
         if action == DOWNLOAD_COMPLETE:
-            self.online_data_refresh(is_download_complete=True)
+            if OPERATING_SYSTEM != "Linux":
+                self.online_data_refresh(is_download_complete=True)
             self.download_progress_info_var.set(DOWNLOAD_COMPLETE)
             self.download_list_state()
         if action == DOWNLOAD_UPDATE_COMPLETE:
